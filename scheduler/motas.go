@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"fmt"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -46,6 +47,9 @@ func (m *MOTAS) killed() bool {
 
 // Run 运行 MOTAS
 func (m *MOTAS) run() {
+	DLogINFO("▶️ start running MOTAS...")
+	defer DLogINFO("⏹ end running MOTAS...")
+
 	var (
 		app     *Service
 		ms2node map[msId]nodeId
@@ -55,25 +59,46 @@ func (m *MOTAS) run() {
 	for !m.killed() {
 		for !m.scheduleQ.empty() {
 			app = m.scheduleQ.pop()
+			m.app[app.id] = app
+			DLogINFO("⏰ app(id=%s) is being scheduled", app.id)
 			ms2node, err = m.recursiveMapping(app.id, app.ms, m.cluster)
 			if err != nil || len(ms2node) == 0 { // 没能得到一个有效的映射结果，降低该应用调度优先级并重新放入队列（错误类型只有资源不足）
 				// 状态回滚
-				m.cluster.rollbackAlloc()
-				m.cluster.rollbackGama()
-				m.cluster.rollbackBandAlloc()
+				m.cluster.rollbackStat()
 				app.rollbackPlaceStat()
 				// 降低优先级并重入队列
 				app.decPriority()
 				m.scheduleQ.push(app)
+				DLogINFO("❌ app(id=%s) scheduling fails, lowers the priority and re-enters the queue", app.id)
 			} else {
-				m.doPlacement(ms2node) // 根据映射关系将微服务放置到对应的工作节点上
+				m.doPlacement(app.id, ms2node) // 根据映射关系将微服务放置到对应的工作节点上
+				DLogINFO("✅ app(id=%s) was scheduled successfully", app.id)
+				DLogINFO("the mapping of microservices and worker nodes:")
+				for mid, nid := range ms2node {
+					DLogINFO("- ms:%s -> node:%s", mid, nid)
+				}
 			}
+			m.Kill() //
+			break    //
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+	for _, node := range m.cluster.nodes {
+		fmt.Printf("%s: \n", node.id)
+		for _, typ := range node.resType {
+			fmt.Printf("- %v: alloc/cap=%.2f/%.2f\n", typ, node.alloc[typ].value, node.capa[typ].value)
+		}
+		fmt.Println()
+	}
+	for _, links := range m.cluster.links {
+		for _, link := range links {
+			fmt.Printf("%s -> %s: alloc/cap=%.2f/%.2f\n", link.from, link.to, link.bandAlloc, link.bandCap)
+		}
 	}
 }
 
 func (m *MOTAS) AddTask(app *Service) {
+	DLogINFO("app(id=%s) enters the scheduling queue", app.id)
 	m.scheduleQ.push(app)
 }
 
@@ -89,37 +114,65 @@ func (m *MOTAS) recursiveMapping(aid appId, mss map[msId]*Microservice, cluster 
 		for _, n := range cluster.nodes { // 取出唯一节点
 			node = n
 		}
-		for _, ms := range mss { // 建立服务和工作节点的映射关系，并预分配资源
-			// 服务与节点的映射关系
-			m.app[aid].setNextPlaceNode(ms.id, node.id)
+		fmt.Printf("pre-placement: ")
+		for _, ms := range mss { // 建立服务和工作节点的映射关系，预分配资源
+			fmt.Printf("map %s->%s  ", ms.id, node.id)
 			ms2node[ms.id] = node.id
-			// 预分配各维度资源并计算资源利用率（以确定资源碎片）
-			for _, res := range ms.resReq {
-				cluster.incNextAlloc(node.id, res.resType, res.value)
-				cluster.updateNextGama(node.id, res.resType)
-			}
-			// 预分配当前节点与下游服务节点的带宽
+			m.app[aid].setNextPlaceNode(ms.id, node.id)
+			m.cluster.incAllNextAlloc(node.id, ms.resReq)
+			m.cluster.updateNextGama(node.id)
 			for _, dep := range m.app[aid].dep[ms.id] {
-				um := m.app[aid].ms[dep.dmId]
-				cluster.incNextBandAlloc(node.id, um.placeNode, dep.trans)
+				dm := m.app[aid].ms[dep.dmId]
+				m.cluster.incNextBandAlloc(node.id, dm.nextPlaceNode, dep.trans)
 			}
 		}
+		fmt.Println()
+
+		//
+		for _, node = range m.cluster.nodes {
+			fmt.Printf("%s: \n", node.id)
+			for _, typ := range node.resType {
+				fmt.Printf("- %v: next alloc/cap=%.2f/%.2f\n", typ, node.nextAlloc[typ].value, node.capa[typ].value)
+			}
+			fmt.Println()
+		}
+		for _, links := range m.cluster.links {
+			for _, link := range links {
+				fmt.Printf("%s -> %s: next alloc/cap=%.2f/%.2f\n", link.from, link.to, link.nextBandAlloc, link.bandCap)
+			}
+		}
+		//
 		return ms2node, nil
 	}
 
 	// partition
-	c0, c1 := m.nodePartition(cluster)                           // 在最小分割数的基础上选出最小链路通信开销的工作节点划分方案
-	mss0, mss1, err := m.microservicePartition(aid, mss, c0, c1) // 根据通信开销、网络干扰和资源碎片将微服务划分到 c0 或 c1 分区
+	c0, c1 := m.nodePartition(cluster)                                   // 在最小分割数的基础上选出最小链路通信开销的工作节点划分方案
+	mss0, mss1, lfirst, err := m.microservicePartition(aid, mss, c0, c1) // 根据通信开销、网络干扰和资源碎片将微服务划分到 c0 或 c1 分区
 	if err != nil {
 		return ms2node, err
 	}
-	ms2node0, err := m.recursiveMapping(aid, mss0, c0) // 递归处理 c0 分区
-	if err != nil {
-		return ms2node, err
-	}
-	ms2node1, err := m.recursiveMapping(aid, mss1, c1) // 递归处理 c1 分区
-	if err != nil {
-		return ms2node, err
+	var (
+		ms2node0 map[msId]nodeId
+		ms2node1 map[msId]nodeId
+	)
+	if lfirst {
+		ms2node0, err = m.recursiveMapping(aid, mss0, c0) // 递归处理 c0 分区
+		if err != nil {
+			return ms2node, err
+		}
+		ms2node1, err = m.recursiveMapping(aid, mss1, c1) // 递归处理 c1 分区
+		if err != nil {
+			return ms2node, err
+		}
+	} else {
+		ms2node1, err = m.recursiveMapping(aid, mss1, c1) // 递归处理 c1 分区
+		if err != nil {
+			return ms2node, err
+		}
+		ms2node0, err = m.recursiveMapping(aid, mss0, c0) // 递归处理 c0 分区
+		if err != nil {
+			return ms2node, err
+		}
 	}
 	for mid, nid := range ms2node0 { // ms2node = ms2node0 + ms2node1
 		ms2node[mid] = nid
@@ -130,16 +183,24 @@ func (m *MOTAS) recursiveMapping(aid appId, mss map[msId]*Microservice, cluster 
 	return ms2node, nil
 }
 
-func (m *MOTAS) doPlacement(ms2node map[msId]nodeId) {
+func (m *MOTAS) doPlacement(aid appId, ms2node map[msId]nodeId) {
 	//TODO：
 	// - 1. 与 k8s 进行交互
 	// - 2. 调用相关 commit 操作更新集群资源状态
+	m.cluster.commitAlloc()
+	m.cluster.commitGama()
+	m.cluster.commitBandAlloc()
+	m.app[aid].commitPlaceStat()
 }
 
 // nodePartition 使用 Fiduccia-Mattheyses 算法得到具有最小分割（cut size）的工作节点划分方案
 func (m *MOTAS) nodePartition(cluster *Cluster) (*Cluster, *Cluster) {
 	// FM 算法对图进行分割
 	records := cluster.hyperGraphPartition()
+	fmt.Println("min cut size partition: ")
+	for i, record := range records {
+		fmt.Printf("- #%d %s %d %v %v\n", i, record.cell, record.cutSize, record.left, record.right)
+	}
 	// 在这些方案中搜索左右分区具有最小链路通信成本（cost）的方案
 	var (
 		minCost float32 = math.MaxFloat32 / 2
@@ -178,51 +239,144 @@ func (m *MOTAS) nodePartition(cluster *Cluster) (*Cluster, *Cluster) {
 	for _, nid := range records[minIdx].right {
 		c1.nodes[nid] = cluster.nodes[nid]
 	}
-
+	fmt.Println(" left: ", records[minIdx].left)
+	fmt.Println("right: ", records[minIdx].right)
 	return c0, c1
 }
 
 func (m *MOTAS) microservicePartition(aid appId, mss map[msId]*Microservice, cluster0 *Cluster, cluster1 *Cluster) (
-	map[msId]*Microservice, map[msId]*Microservice, error) {
+	map[msId]*Microservice, map[msId]*Microservice, bool, error) {
 
-	ms0 := make(map[msId]*Microservice)
-	ms1 := make(map[msId]*Microservice)
-	// 按照拓扑序对微服务进行遍历（若 A 调用 B，则 A 依赖 B，拓扑序为：B、A）
-	order := m.app[aid].getTopologyOrder()
+	// 需要在退出函数后恢复集群状态
+	//FIXME:
+	// - 用这个来取代后面的状态撤销操作，但有 bug, why...
+	// - 因为快照是整个 cluster 的，而这里分了左右 c0、c1，造成 cluster 和 c0、c1 数据不一致
+	// - 在递归调用时使用的是 c0、c1，所以在分配资源时有超过 capacity 的错误
+	//cSnapshot := m.cluster.clone()
+	//fmt.Println("snapshot:")
+	//defer func() { m.cluster = cSnapshot }()
+	//
+
+	//
+	type nodeR struct {
+		maxGama float32
+		minGama float32
+	}
+	mids := make([]msId, 0, len(mss)) // 记录微服务顺序
+	msR := make(map[msId]nodeId)      // 记录服务对应的节点
+	nR := make(map[nodeId]nodeR)      // 记录节点信息
+	//
+
+	var (
+		nid    nodeId
+		ms0    = make(map[msId]*Microservice)
+		ms1    = make(map[msId]*Microservice)
+		order  = m.app[aid].getTopologyOrder() // 按照拓扑序对微服务进行遍历（若 A 调用 B，则 A 依赖 B，拓扑序为：B、A）
+		lfirst = false
+		i      = 0
+	)
 	for _, mid := range order {
 		if _, ok := mss[mid]; !ok {
 			continue
 		}
 
 		// 过滤掉不满足资源需求或违背资源平衡性的工作节点，err 只有资源不足一种错误类型
-		node0, err := cluster0.filterBalanceNode(m.app[aid], mid)
-		if err != nil {
-			return ms0, ms1, err
+		DLogINFO("left: ")
+		node0, err0 := cluster0.filterBalanceNode(m.app[aid], mid)
+		DLogINFO("right: ")
+		node1, err1 := cluster1.filterBalanceNode(m.app[aid], mid)
+		if err0 != nil && err1 != nil {
+			return ms0, ms1, lfirst, err0
 		}
-		node1, err := cluster1.filterBalanceNode(m.app[aid], mid)
-		if err != nil {
-			return ms0, ms1, err
+
+		var (
+			n0     nodeId
+			n1     nodeId
+			path0  map[nodeId][]nodeId
+			path1  map[nodeId][]nodeId
+			cost0  float32 = math.MaxFloat32 / 4
+			cost1  float32 = math.MaxFloat32 / 4
+			inter0 float32 = math.MaxFloat32 / 4
+			inter1 float32 = math.MaxFloat32 / 4
+			frag0  float32 = math.MaxFloat32 / 4
+			frag1  float32 = math.MaxFloat32 / 4
+		)
+		if err0 != nil { // 只计算在右分区的情况
+			cost1, n1, path1 = m.getMinCost(aid, mid, node1)
+			inter1 = m.getInter(aid, mid, n1, path1)
+			frag1 = m.getFrag(aid, mid, n1)
+
+		} else if err1 != nil { // 只计算在左分区的情况
+			cost0, n0, path0 = m.getMinCost(aid, mid, node0)
+			inter0 = m.getInter(aid, mid, n0, path0)
+			frag0 = m.getFrag(aid, mid, n0)
+
+		} else { // err0 == err1 == nil
+			// 分别计算该微服务在两个分区中的最小通信成本
+			cost0, n0, path0 = m.getMinCost(aid, mid, node0)
+			cost1, n1, path1 = m.getMinCost(aid, mid, node1)
+			// 分别计算该微服务在两个分区中最小通信成本节点上的网络干扰
+			inter0 = m.getInter(aid, mid, n0, path0)
+			inter1 = m.getInter(aid, mid, n1, path1)
+			// 分别计算该微服务在两个分区中最小通信成本节点上的资源碎片情况
+			frag0 = m.getFrag(aid, mid, n0)
+			frag1 = m.getFrag(aid, mid, n1)
 		}
-		// 分别计算该微服务在两个分区中的最小通信成本
-		cost0, n0, path0 := m.getMinCost(aid, mid, node0)
-		cost1, n1, path1 := m.getMinCost(aid, mid, node1)
-		// 分别计算该微服务在两个分区中最小通信成本节点上的网络干扰
-		inter0 := m.getInter(aid, mid, n0, path0)
-		inter1 := m.getInter(aid, mid, n1, path1)
-		// 分别计算该微服务在两个分区中最小通信成本节点上的资源碎片情况
-		frag0 := m.getFrag(aid, mid, n0)
-		frag1 := m.getFrag(aid, mid, n1)
+
 		// 分别计算该微服务在两个分区上的效用值
 		score0 := m.score(cost0, inter0, frag0)
 		score1 := m.score(cost1, inter1, frag1)
 		if score0 < score1 {
+			fmt.Println(mid, "left")
 			ms0[mid] = mss[mid]
+			nid = n0
+			if i == 0 {
+				lfirst = true
+			}
 		} else {
+			fmt.Println(mid, "right")
 			ms1[mid] = mss[mid]
+			nid = n1
+		}
+		ms := m.app[aid].ms[mid]
+		prevNid := ms.nextPlaceNode
+		// 记录状态用于撤销
+		mids = append(mids, mid)
+		msR[mid] = nid
+		if _, ok := nR[nid]; !ok {
+			nR[nid] = nodeR{
+				maxGama: m.cluster.nodes[nid].nextMaxGama,
+				minGama: m.cluster.nodes[nid].nextMinGama,
+			}
+		}
+		//
+
+		m.app[aid].setNextPlaceNode(mid, nid)
+		fmt.Printf("ms=%s inc alloc, prev=%s, nid=%s\n", ms.id, prevNid, nid)
+		m.cluster.incAllNextAlloc(nid, ms.resReq)
+		m.cluster.updateNextGama(nid)
+		for _, dep := range m.app[aid].dep[mid] {
+			dm := m.app[aid].ms[dep.dmId]
+			m.cluster.incNextBandAlloc(nid, dm.nextPlaceNode, dep.trans)
+		}
+
+		i++
+	}
+	// 撤销状态
+	for _, mid := range mids {
+		nid = msR[mid]
+		m.cluster.decAllNextAlloc(nid, m.app[aid].ms[mid].resReq)
+		for _, dep := range m.app[aid].dep[mid] {
+			dm := m.app[aid].ms[dep.dmId]
+			m.cluster.decNextBandAlloc(nid, dm.nextPlaceNode, dep.trans)
 		}
 	}
-
-	return ms0, ms1, nil
+	for id, r := range nR {
+		m.cluster.nodes[id].nextMinGama = r.minGama
+		m.cluster.nodes[id].nextMaxGama = r.maxGama
+	}
+	//
+	return ms0, ms1, lfirst, nil
 }
 
 func (m *MOTAS) getMinCost(aid appId, mid msId, srcs []nodeId) (float32, nodeId, map[nodeId][]nodeId) {

@@ -6,13 +6,27 @@ import (
 	"time"
 )
 
+var (
+	resType = []ResourceType{ResCPU, ResMem}
+	resReq  = map[ResourceType]Resource{
+		ResCPU: {ResCPU, 2},       // cores
+		ResMem: {ResMem, 25 * MB}, // MB
+	}
+	BandReq float32 = 15 * MB
+
+	resCPU float32 = 8
+	resMem float32 = 120 * MB
+	brand  float32 = 30 * MB
+)
+
 func TestMOTAS(t *testing.T) {
-	app := tService
-	cluster := tCluster
+	app := newTestService(resReq, BandReq)
+	cluster := newTestCluster(resType, resCPU, resMem, brand)
 	mts := NewMOTAS(cluster)
 	mts.AddTask(app)
 	time.Sleep(5 * time.Second)
 	mts.Kill()
+	time.Sleep(2 * time.Second)
 }
 
 func TestMsQueue(t *testing.T) {

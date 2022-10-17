@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"fmt"
 	"math"
 )
 
@@ -46,8 +47,10 @@ func newHyperGraph(c *Cluster) *HyperGraph {
 	}
 
 	hpg.left, hpg.right = hpg.randomPartition() // 随机分区
-	hpg.minCutSize = hpg.computeCutSize()       // 计算初始化状态的 cut size
-	hpg.initGains()                             // 初始化 gain 值
+	fmt.Println("hyperGraph", hpg.left)
+	fmt.Println("hyperGraph", hpg.right)
+	hpg.minCutSize = hpg.computeCutSize() // 计算初始化状态的 cut size
+	hpg.initGains()                       // 初始化 gain 值
 	hpg.Records = append(hpg.Records, newRecord("-", 0, 0, hpg.minCutSize, hpg.left.cellsFormat(), hpg.right.cellsFormat()))
 	hpg.minRecordIdx = append(hpg.minRecordIdx, 0)
 	return hpg
@@ -64,7 +67,7 @@ func (h *HyperGraph) fmRun() {
 		// 构造并存储分割记录，另外还需记录最小 cut size 记录对应的下标
 		record := h.structureRecord(swapped)
 		h.Records = append(h.Records, record)
-		if record.cutSize < h.minCutSize {
+		if record.cutSize < h.minCutSize && record.cutSize > 0 {
 			h.minCutSize = record.cutSize
 			h.minRecordIdx = make([]int, 0)
 			h.minRecordIdx = append(h.minRecordIdx, len(h.Records)-1)
@@ -165,13 +168,18 @@ func (h *HyperGraph) computeCutSize() int {
 			continue
 		}
 
-		for i, nid := range edge {
+		i := 0
+		for _, nid := range edge {
+			if _, ok := h.cells[nid]; !ok {
+				continue
+			}
 			if i == 0 {
 				partition = h.cells[nid].partition
 			} else if partition != h.cells[nid].partition {
 				cutSize++
 				break
 			}
+			i++
 		}
 	}
 	return cutSize
@@ -183,6 +191,9 @@ func (h *HyperGraph) initGains() {
 		for _, edge := range h.getEdgeById(curCell.id) {
 			samePar := 1
 			for _, nid := range edge {
+				if _, ok := h.cells[nid]; !ok {
+					continue
+				}
 				if curCell.id == nid {
 					continue
 				}
@@ -215,6 +226,9 @@ func (h *HyperGraph) computeGains(affected []nodeId) {
 		for _, edge := range h.getEdgeById(curId) {
 			samePar := 1
 			for _, nid := range edge {
+				if _, ok := h.cells[nid]; !ok {
+					continue
+				}
 				if curId == nid {
 					continue
 				}
@@ -271,6 +285,9 @@ func (h *HyperGraph) selectAndSwap() (nodeId, []nodeId) {
 	affected := make(map[nodeId]struct{})
 	for _, edge := range h.getEdgeById(swap) {
 		for _, afId := range edge {
+			if _, ok := h.cells[afId]; !ok {
+				continue
+			}
 			if afId != swap && !h.cells[afId].isSwapped {
 				retAffected = append(retAffected, afId)
 				affected[afId] = struct{}{}

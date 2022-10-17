@@ -2,9 +2,10 @@ package scheduler
 
 import (
 	"fmt"
-	"github.com/WeixinX/topology-aware-scheduling-framework/util"
 	"log"
 	"sync"
+
+	"github.com/WeixinX/topology-aware-scheduling-framework/util"
 )
 
 //
@@ -96,7 +97,6 @@ func (s *pathStack) size() int {
 //
 // DLog debug log
 //
-
 var openDebugLog = true
 
 func DLog(level string, format string, v ...interface{}) {

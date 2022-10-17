@@ -2,8 +2,9 @@ package scheduler
 
 import (
 	"errors"
-
 	"math"
+	
+	"github.com/jinzhu/copier"
 
 	"github.com/WeixinX/topology-aware-scheduling-framework/util"
 )
@@ -162,10 +163,18 @@ type Link struct {
 	nextBandAlloc float32
 }
 
+type Resource struct {
+	resType ResourceType
+	value   float32
+}
+
+type ResourceType uint
+
 func (c *Cluster) nodeCount() int {
 	return len(c.nodes)
 }
 
+// filterBalanceNode
 func (c *Cluster) filterBalanceNode(app *Service, mid msId) ([]nodeId, error) {
 	// condition 1: resource capacity
 	n1 := make([]nodeId, 0)
@@ -181,15 +190,14 @@ func (c *Cluster) filterBalanceNode(app *Service, mid msId) ([]nodeId, error) {
 				break
 			}
 		}
-		if !cond1 {
-			continue
+		if cond1 {
+			n1 = append(n1, node.id)
 		}
-		n1 = append(n1, node.id)
 	}
 	if len(n1) == 0 {
 		return n1, errors.New("out of resources") // 资源不足
 	}
-	DLogINFO("satisfy cond 1: %v\n", n1)
+	DLogINFO("satisfy cond 1: %v", n1)
 
 	// condition 2: resource fragment
 	n2 := make([]nodeId, 0)
@@ -213,15 +221,15 @@ func (c *Cluster) filterBalanceNode(app *Service, mid msId) ([]nodeId, error) {
 		}
 		n2 = append(n2, nid)
 	}
-	DLogINFO("satisfy cond 2: %v\n", n2)
+	DLogINFO("satisfy cond 2: %v", n2)
 
 	// condition 3: bandwidth available of the link
-	//FIXME 两端点不一定直达，可能中间有很多条 link，那么需要考虑每一条 link 的可用带宽，那这可能还需要考虑交换机...先假设可直达吧
+	// FIXME 两端点不一定直达，可能中间有很多条 link，那么需要考虑每一条 link 的可用带宽，那这可能还需要考虑交换机...先假设可直达吧
 	canPlaceN := make([]nodeId, 0)
 	for _, nid := range n2 {
 		cond3 := true
 		for _, dep := range app.dep[mid] {
-			dest := app.ms[dep.dmId].placeNode
+			dest := app.ms[dep.dmId].nextPlaceNode
 			if dest != NotPlaced {
 				link, ok := c.links[nid][dest]
 				if !ok || dep.trans+link.nextBandAlloc > link.bandCap {
@@ -234,12 +242,11 @@ func (c *Cluster) filterBalanceNode(app *Service, mid msId) ([]nodeId, error) {
 				}
 			}
 		}
-		if !cond3 {
-			continue
+		if cond3 {
+			canPlaceN = append(canPlaceN, nid)
 		}
-		canPlaceN = append(canPlaceN, nid)
 	}
-	DLogINFO("satisfy cond 3: %v\n", canPlaceN)
+	DLogINFO("satisfy cond 3 for ms(id=%s): %v", mid, canPlaceN)
 
 	return canPlaceN, nil
 }
@@ -328,9 +335,37 @@ func (c *Cluster) getMinCutSizeRecords() []*Record {
 	return c.hpg.minCutSizeRecords()
 }
 
+// incAllNextAlloc 预分配所有资源
+func (c *Cluster) incAllNextAlloc(nid nodeId, req map[ResourceType]Resource) {
+	for typ, res := range req {
+		c.incNextAlloc(nid, typ, res.value)
+	}
+}
+
 // incNextAlloc 预分配资源
 func (c *Cluster) incNextAlloc(nid nodeId, typ ResourceType, inc float32) {
 	c.nodes[nid].nextAlloc[typ].value += inc
+}
+
+// decAllNextAlloc 回收所有预分配资源
+func (c *Cluster) decAllNextAlloc(nid nodeId, req map[ResourceType]Resource) {
+	for typ, res := range req {
+		c.decNextAlloc(nid, typ, res.value)
+	}
+}
+
+// decNextAlloc 回收预分配资源
+func (c *Cluster) decNextAlloc(nid nodeId, typ ResourceType, inc float32) {
+	c.nodes[nid].nextAlloc[typ].value -= inc
+}
+
+// rollbackPartitionNextAlloc 回滚一个分区预分配资源
+func (c *Cluster) rollbackPartitionNextAlloc(nodes map[nodeId]*Node) {
+	for _, node := range nodes {
+		for _, typ := range node.resType {
+			node.nextAlloc[typ].value = node.alloc[typ].value
+		}
+	}
 }
 
 // rollbackAlloc 将预分配资源回滚到原来的状态
@@ -352,14 +387,25 @@ func (c *Cluster) commitAlloc() {
 }
 
 // updateNextGama 更新资源利用率情况 gama
-func (c *Cluster) updateNextGama(nid nodeId, typ ResourceType) {
-	gama := c.nodes[nid].nextAlloc[typ].value / c.nodes[nid].capa[typ].value
-	if gama > c.nodes[nid].nextMaxGama {
-		c.nodes[nid].nextMaxGama = gama
+func (c *Cluster) updateNextGama(nid nodeId) {
+	var minGama float32 = math.MaxFloat32 / 2
+	var maxGama float32 = 0
+	node := c.nodes[nid]
+
+	for _, typ := range node.resType {
+		alloc := node.nextAlloc[typ].value
+		capa := node.capa[typ].value
+		gama := alloc / capa
+		//fmt.Println(alloc, capa)
+		if gama > maxGama {
+			maxGama = gama
+		}
+		if gama < minGama {
+			minGama = gama
+		}
 	}
-	if gama < c.nodes[nid].nextMinGama {
-		c.nodes[nid].nextMinGama = gama
-	}
+	node.nextMinGama = minGama
+	node.nextMaxGama = maxGama
 }
 
 // rollbackGama 回滚资源利用率情况
@@ -384,8 +430,23 @@ func (c *Cluster) incNextBandAlloc(from, to nodeId, inc float32) {
 	if link, ok := c.links[from][to]; ok {
 		link.nextBandAlloc += inc
 	}
-	if link, ok := c.links[to][from]; ok {
-		link.nextBandAlloc += inc
+	if from != to {
+		if link, ok := c.links[to][from]; ok {
+			link.nextBandAlloc += inc
+		}
+	}
+}
+
+// decNextBandAlloc 回收预分配链路带宽
+func (c *Cluster) decNextBandAlloc(from, to nodeId, inc float32) {
+	// 假设无向
+	if link, ok := c.links[from][to]; ok {
+		link.nextBandAlloc -= inc
+	}
+	if from != to {
+		if link, ok := c.links[to][from]; ok {
+			link.nextBandAlloc -= inc
+		}
 	}
 }
 
@@ -403,12 +464,41 @@ func (c *Cluster) commitBandAlloc() {
 			link.bandAlloc = link.nextBandAlloc
 		}
 	}
-
 }
 
-type Resource struct {
-	resType ResourceType
-	value   float32
+// rollbackStat 回滚集群状态
+func (c *Cluster) rollbackStat() {
+	c.rollbackAlloc()
+	c.rollbackGama()
+	c.rollbackBandAlloc()
 }
 
-type ResourceType uint
+// clone 克隆集群状态，可用于撤销
+func (c *Cluster) clone() *Cluster {
+	// 对于结构体中有 map 类型且未导出的字段，需要对其进行初始化然后再深拷贝
+	ret := Cluster{
+		nodes: map[nodeId]*Node{},
+		links: map[nodeId]map[nodeId]*Link{},
+		hpg:   nil,
+	}
+	copier.CopyWithOption(&ret.nodes, c.nodes, copier.Option{DeepCopy: true})
+	copier.CopyWithOption(&ret.links, c.links, copier.Option{DeepCopy: true}) //
+	for nid, node := range c.nodes {
+		ret.nodes[nid].alloc = map[ResourceType]*Resource{}
+		ret.nodes[nid].capa = map[ResourceType]*Resource{}
+		ret.nodes[nid].nextAlloc = map[ResourceType]*Resource{}
+		ret.nodes[nid].args = map[ResourceType]float32{}
+		copier.CopyWithOption(&ret.nodes[nid].alloc, &node.alloc, copier.Option{DeepCopy: true})
+		copier.CopyWithOption(&ret.nodes[nid].capa, &node.capa, copier.Option{DeepCopy: true})
+		copier.CopyWithOption(&ret.nodes[nid].nextAlloc, &node.nextAlloc, copier.Option{DeepCopy: true})
+		copier.CopyWithOption(&ret.nodes[nid].args, &node.args, copier.Option{DeepCopy: true})
+	}
+	//for from, links := range c.links {
+	//	ret.links[from] = map[nodeId]*Link{}
+	//	for to, link := range links {
+	//		v := *link
+	//		ret.links[from][to] = &v
+	//	}
+	//}
+	return &ret
+}

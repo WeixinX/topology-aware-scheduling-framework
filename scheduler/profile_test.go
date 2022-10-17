@@ -2,224 +2,12 @@ package scheduler
 
 import (
 	"fmt"
-	"math"
 	"testing"
 )
 
-var (
-	tResType = []ResourceType{ResCPU, ResMem}
-	tResReq  = map[ResourceType]Resource{
-		ResCPU: {ResCPU, 2},       // cores
-		ResMem: {ResMem, 60 * MB}, // MB
-	}
-	tService = &Service{
-		id:     "test0",
-		rootId: "A",
-		ms: map[msId]*Microservice{
-			"A": {
-				id:            "A",
-				resReq:        tResReq,
-				placeNode:     NotPlaced,
-				nextPlaceNode: NotPlaced,
-			},
-			"B": {
-				id:            "B",
-				resReq:        tResReq,
-				placeNode:     NotPlaced,
-				nextPlaceNode: NotPlaced,
-			},
-			"C": {
-				id:            "C",
-				resReq:        tResReq,
-				placeNode:     NotPlaced,
-				nextPlaceNode: NotPlaced,
-			},
-			"D": {
-				id:            "D",
-				resReq:        tResReq,
-				placeNode:     NotPlaced,
-				nextPlaceNode: NotPlaced,
-			},
-			"E": {
-				id:            "E",
-				resReq:        tResReq,
-				placeNode:     NotPlaced,
-				nextPlaceNode: NotPlaced,
-			},
-			"F": {
-				id:            "F",
-				resReq:        tResReq,
-				placeNode:     NotPlaced,
-				nextPlaceNode: NotPlaced,
-			},
-		},
-		dep: map[msId][]*Dependence{
-			"A": {
-				{"A", "B", 1 * MB},
-				{"A", "C", 1 * MB},
-			},
-			"B": {
-				{"B", "D", 1 * MB},
-				{"B", "E", 1 * MB},
-			},
-			"C": {
-				{"C", "D", 1 * MB},
-				{"C", "F", 1 * MB},
-			},
-		},
-		reDep: map[msId][]*Dependence{
-			"B": {
-				{"A", "B", 1 * MB},
-			},
-			"C": {
-				{"A", "C", 1 * MB},
-			},
-			"D": {
-				{"B", "D", 1 * MB},
-				{"C", "D", 1 * MB},
-			},
-			"E": {
-				{"B", "E", 1 * MB},
-			},
-			"F": {
-				{"C", "F", 1 * MB},
-			},
-		},
-		priority: 5,
-	}
-	tCluster = &Cluster{
-		nodes: map[nodeId]*Node{
-			"node0": {
-				id:          "node0",
-				resType:     tResType,
-				capa:        map[ResourceType]*Resource{ResCPU: {ResCPU, 8}, ResMem: {ResMem, 32 * GB}},
-				alloc:       map[ResourceType]*Resource{ResCPU: {ResCPU, 0}, ResMem: {ResMem, 0}},
-				nextAlloc:   map[ResourceType]*Resource{ResCPU: {ResCPU, 0}, ResMem: {ResMem, 0}},
-				args:        map[ResourceType]float32{ResCPU: 0.5, ResMem: 0.5},
-				minGama:     math.MaxFloat32,
-				nextMinGama: math.MaxFloat32,
-				threshold:   0.8,
-			},
-			"node1": {
-				id:          "node1",
-				resType:     tResType,
-				capa:        map[ResourceType]*Resource{ResCPU: {ResCPU, 8}, ResMem: {ResMem, 32 * GB}},
-				alloc:       map[ResourceType]*Resource{ResCPU: {ResCPU, 0}, ResMem: {ResMem, 0}},
-				nextAlloc:   map[ResourceType]*Resource{ResCPU: {ResCPU, 0}, ResMem: {ResMem, 0}},
-				args:        map[ResourceType]float32{ResCPU: 0.5, ResMem: 0.5},
-				minGama:     math.MaxFloat32,
-				nextMinGama: math.MaxFloat32,
-				threshold:   0.8,
-			},
-			"node2": {
-				id:          "node2",
-				resType:     tResType,
-				capa:        map[ResourceType]*Resource{ResCPU: {ResCPU, 8}, ResMem: {ResMem, 32 * GB}},
-				alloc:       map[ResourceType]*Resource{ResCPU: {ResCPU, 0}, ResMem: {ResMem, 0}},
-				nextAlloc:   map[ResourceType]*Resource{ResCPU: {ResCPU, 0}, ResMem: {ResMem, 0}},
-				args:        map[ResourceType]float32{ResCPU: 0.5, ResMem: 0.5},
-				minGama:     math.MaxFloat32,
-				nextMinGama: math.MaxFloat32,
-				threshold:   0.8,
-			},
-			"node3": {
-				id:          "node3",
-				resType:     tResType,
-				capa:        map[ResourceType]*Resource{ResCPU: {ResCPU, 8}, ResMem: {ResMem, 32 * GB}},
-				alloc:       map[ResourceType]*Resource{ResCPU: {ResCPU, 0}, ResMem: {ResMem, 0}},
-				nextAlloc:   map[ResourceType]*Resource{ResCPU: {ResCPU, 0}, ResMem: {ResMem, 0}},
-				args:        map[ResourceType]float32{ResCPU: 0.5, ResMem: 0.5},
-				minGama:     math.MaxFloat32,
-				nextMinGama: math.MaxFloat32,
-				threshold:   0.8,
-			},
-		},
-		links: map[nodeId]map[nodeId]*Link{
-			"node0": {
-				"node1": &Link{
-					from:    "node0",
-					to:      "node1",
-					cost:    1,
-					bandCap: 30 * MB,
-				},
-				"node2": &Link{
-					from:    "node0",
-					to:      "node2",
-					cost:    1,
-					bandCap: 30 * MB,
-				},
-				"node3": &Link{
-					from:    "node0",
-					to:      "node3",
-					cost:    1,
-					bandCap: 30 * MB,
-				},
-			},
-			"node1": {
-				"node0": &Link{
-					from:    "node1",
-					to:      "node0",
-					cost:    1,
-					bandCap: 30 * MB,
-				},
-				"node2": &Link{
-					from:    "node1",
-					to:      "node2",
-					cost:    1,
-					bandCap: 30 * MB,
-				},
-				"node3": &Link{
-					from:    "node1",
-					to:      "node3",
-					cost:    1,
-					bandCap: 30 * MB,
-				},
-			},
-			"node2": {
-				"node0": &Link{
-					from:    "node2",
-					to:      "node0",
-					cost:    1,
-					bandCap: 30 * MB,
-				},
-				"node1": &Link{
-					from:    "node2",
-					to:      "node1",
-					cost:    1,
-					bandCap: 30 * MB,
-				},
-				"node3": &Link{
-					from:    "node2",
-					to:      "node3",
-					cost:    1,
-					bandCap: 30 * MB,
-				},
-			},
-			"node3": {
-				"node0": &Link{
-					from:    "node3",
-					to:      "node0",
-					cost:    1,
-					bandCap: 30 * MB,
-				},
-				"node1": &Link{
-					from:    "node3",
-					to:      "node1",
-					cost:    1,
-					bandCap: 30 * MB,
-				},
-				"node2": &Link{
-					from:    "node3",
-					to:      "node2",
-					cost:    1,
-					bandCap: 30 * MB,
-				},
-			},
-		},
-	}
-)
-
 func TestServiceProfile(t *testing.T) {
+	tService := newTestService(DefaultResReq, DefaultBandReq)
+
 	fmt.Println("ms count: ", tService.msCount())
 	fmt.Println("priority: ", tService.priority)
 	tService.decPriority()
@@ -239,6 +27,8 @@ func TestServiceProfile(t *testing.T) {
 }
 
 func TestClusterProfile(t *testing.T) {
+	tCluster := newTestCluster(DefaultResType, DefaultResCPU, DefaultResMem, DefaultBrand)
+
 	fmt.Println("node count: ", tCluster.nodeCount())
 
 	minCost, path := tCluster.minimalCostPath("node0", []nodeId{"node1", "node2", "node3"})
@@ -253,9 +43,9 @@ func TestClusterProfile(t *testing.T) {
 	fmt.Println("total min cost: ", minCost)
 
 	tCluster.incNextAlloc("node0", ResCPU, 4)
-	tCluster.updateNextGama("node0", ResCPU)
-	tCluster.incNextAlloc("node0", ResMem, 30*GB)
-	tCluster.updateNextGama("node0", ResMem)
+	tCluster.updateNextGama("node0")
+	tCluster.incNextAlloc("node0", ResMem, 100*MB)
+	tCluster.updateNextGama("node0")
 	tCluster.incNextBandAlloc("node0", "node1", KB)
 	fmt.Println("next alloc cpu: ", tCluster.nodes["node0"].nextAlloc[ResCPU].value)
 	fmt.Println("next band alloc from 0 to 1: ", tCluster.links["node0"]["node1"].nextBandAlloc)
@@ -291,6 +81,9 @@ func TestClusterProfile(t *testing.T) {
 }
 
 func TestFilterBalanceNode(t *testing.T) {
+	tService := newTestService(DefaultResReq, DefaultBandReq)
+	tCluster := newTestCluster(DefaultResType, DefaultResCPU, DefaultResMem, DefaultBrand)
+
 	tCluster.filterBalanceNode(tService, "A")
 	fmt.Println("reduce cpu cores of node1 from 8 to 1")
 	tCluster.nodes["node1"].capa[ResCPU].value = 1
@@ -300,4 +93,119 @@ func TestFilterBalanceNode(t *testing.T) {
 	tService.ms["B"].placeNode = "node3"
 	tCluster.links["node0"]["node3"].bandCap = 0.5 * MB
 	tCluster.filterBalanceNode(tService, "A")
+}
+
+func TestClusterClone(t *testing.T) {
+	tCluster := newTestCluster(DefaultResType, DefaultResCPU, DefaultResMem, DefaultBrand)
+	clone := tCluster.clone()
+	fmt.Println(tCluster)
+	fmt.Println(clone)
+
+	fmt.Println("clone nodes: ")
+	for _, node := range clone.nodes {
+		fmt.Println("nid: ", node.id)
+		fmt.Printf("res type: ")
+		for _, typ := range node.resType {
+			fmt.Printf("%v ", typ)
+		}
+		fmt.Println()
+		fmt.Printf("capa: ")
+		for typ, res := range node.capa {
+			fmt.Printf("%v:%.2f ", typ, res.value)
+		}
+		fmt.Println()
+		fmt.Printf("alloc: ")
+		for typ, res := range node.alloc {
+			fmt.Printf("%v:%.2f ", typ, res.value)
+		}
+		fmt.Println()
+		fmt.Printf("next alloc: ")
+		for typ, res := range node.nextAlloc {
+			fmt.Printf("%v:%.2f ", typ, res.value)
+		}
+		fmt.Println()
+
+		fmt.Printf("args: ")
+		for typ, v := range node.args {
+			fmt.Printf("%v:%.2f ", typ, v)
+		}
+		fmt.Println()
+		fmt.Printf("max gama:%.2f, min gama:%.2f, next max gama:%.2f, next min gama:%.2f, threshold:%.2f\n", node.maxGama, node.minGama, node.nextMaxGama, node.nextMinGama, node.threshold)
+	}
+
+	fmt.Println("clone links: ")
+	for from, links := range clone.links {
+		for to, link := range links {
+			fmt.Printf("%s->%s: next band alloc:%.2f\n", from, to, link.nextBandAlloc)
+		}
+	}
+
+	for _, node := range tCluster.nodes {
+		node.nextMaxGama = 100
+		for _, typ := range node.resType {
+			node.alloc[typ].value = 100
+			node.capa[typ].value = 50
+		}
+	}
+	for _, links := range tCluster.links {
+		for _, link := range links {
+			link.nextBandAlloc = 1000
+		}
+	}
+	fmt.Printf("max gama: ")
+	for _, node := range tCluster.nodes {
+		fmt.Printf("%.2f ", node.nextMaxGama)
+	}
+	fmt.Println()
+	fmt.Printf("alloc: ")
+	for _, node := range tCluster.nodes {
+		for _, typ := range node.resType {
+			fmt.Printf("%.2f ", node.alloc[typ].value)
+		}
+		fmt.Printf(" | ")
+	}
+	fmt.Println()
+	fmt.Printf("capa: ")
+	for _, node := range tCluster.nodes {
+		for _, typ := range node.resType {
+			fmt.Printf("%.2f ", node.capa[typ].value)
+		}
+		fmt.Printf(" | ")
+	}
+	fmt.Println()
+	for from, links := range tCluster.links {
+		for to, link := range links {
+			fmt.Printf("%s->%s: next band alloc:%.2f\n", from, to, link.nextBandAlloc)
+		}
+	}
+	fmt.Println()
+
+	tCluster = clone
+	fmt.Printf("max gama: ")
+	for _, node := range tCluster.nodes {
+		fmt.Printf("%.2f ", node.nextMaxGama)
+	}
+	fmt.Println()
+	fmt.Printf("alloc: ")
+	for _, node := range tCluster.nodes {
+		for _, typ := range node.resType {
+			fmt.Printf("%.2f ", node.alloc[typ].value)
+		}
+		fmt.Printf("| ")
+	}
+	fmt.Println()
+	fmt.Printf("capa: ")
+	for _, node := range tCluster.nodes {
+		for _, typ := range node.resType {
+			fmt.Printf("%.2f ", node.capa[typ].value)
+		}
+		fmt.Printf(" | ")
+	}
+	fmt.Println()
+	for from, links := range tCluster.links {
+		for to, link := range links {
+			fmt.Printf("%s->%s: next band alloc:%.2f\n", from, to, link.nextBandAlloc)
+		}
+	}
+	fmt.Println()
 }
